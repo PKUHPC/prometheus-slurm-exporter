@@ -56,11 +56,62 @@ func PartitionsPendingJobsData() []byte {
         return out
 }
 
+func PartitionsRunningJobsData() []byte {
+        cmd := exec.Command("squeue","-a","-r","-h","-o%P","--states=RUNNING")
+        stdout, err := cmd.StdoutPipe()
+        if err != nil {
+                log.Fatal(err)
+        }
+        if err := cmd.Start(); err != nil {
+                log.Fatal(err)
+        }
+        out, _ := ioutil.ReadAll(stdout)
+        if err := cmd.Wait(); err != nil {
+                log.Fatal(err)
+        }
+        return out
+}
+
+func PartitionsSuspendedJobsData() []byte {
+        cmd := exec.Command("squeue","-a","-r","-h","-o%P","--states=SUSPENDED")
+        stdout, err := cmd.StdoutPipe()
+        if err != nil {
+                log.Fatal(err)
+        }
+        if err := cmd.Start(); err != nil {
+                log.Fatal(err)
+        }
+        out, _ := ioutil.ReadAll(stdout)
+        if err := cmd.Wait(); err != nil {
+                log.Fatal(err)
+        }
+        return out
+}
+
+func PartitionsCompletingJobsData() []byte {
+        cmd := exec.Command("squeue","-a","-r","-h","-o%P","--states=COMPLETING")
+        stdout, err := cmd.StdoutPipe()
+        if err != nil {
+                log.Fatal(err)
+        }
+        if err := cmd.Start(); err != nil {
+                log.Fatal(err)
+        }
+        out, _ := ioutil.ReadAll(stdout)
+        if err := cmd.Wait(); err != nil {
+                log.Fatal(err)
+        }
+        return out
+}
+
 type PartitionMetrics struct {
         allocated float64
         idle float64
         other float64
         pending float64
+        running float64
+        suspended float64
+        completing float64
         total float64
 }
 
@@ -73,7 +124,7 @@ func ParsePartitionsMetrics() map[string]*PartitionMetrics {
                         partition := strings.Split(line,",")[0]
                         _,key := partitions[partition]
                         if !key {
-                                partitions[partition] = &PartitionMetrics{0,0,0,0,0}
+                                partitions[partition] = &PartitionMetrics{0,0,0,0,0,0,0,0}
                         }
                         states := strings.Split(line,",")[1]
                         allocated,_ := strconv.ParseFloat(strings.Split(states,"/")[0],64)
@@ -87,12 +138,42 @@ func ParsePartitionsMetrics() map[string]*PartitionMetrics {
                 }
         }
         // get list of pending jobs by partition name
-        list := strings.Split(string(PartitionsPendingJobsData()),"\n")
-        for _,partition := range list {
-		// accumulate the number of pending jobs
-		_,key := partitions[partition]
-		if key {
-			partitions[partition].pending += 1
+        pendingList := strings.Split(string(PartitionsPendingJobsData()),"\n")
+        for _,partition := range pendingList {
+                // accumulate the number of pending jobs
+                _,key := partitions[partition]
+                if key {
+                        partitions[partition].pending += 1
+                }
+        }
+
+        // get list of running jobs by partition name
+        runningList := strings.Split(string(PartitionsRunningJobsData()),"\n")
+        for _,partition := range runningList {
+                // accumulate the number of running jobs
+                _,key := partitions[partition]
+                if key {
+                        partitions[partition].running += 1
+                }
+        }
+
+        // get list of suspended jobs by partition name
+        suspendedList := strings.Split(string(PartitionsSuspendedJobsData()),"\n")
+        for _,partition := range suspendedList {
+                // accumulate the number of suspended jobs
+                _,key := partitions[partition]
+                if key {
+                        partitions[partition].suspended += 1
+                }
+        }
+
+        // get list of completing jobs by partition name
+        completingList := strings.Split(string(PartitionsCompletingJobsData()),"\n")
+        for _,partition := range completingList {
+                // accumulate the number of completing jobs
+                _,key := partitions[partition]
+                if key {
+                        partitions[partition].completing += 1
                 }
         }
 
@@ -105,6 +186,9 @@ type PartitionsCollector struct {
         idle *prometheus.Desc
         other *prometheus.Desc
         pending *prometheus.Desc
+        running *prometheus.Desc
+        suspended *prometheus.Desc
+        completing *prometheus.Desc
         total *prometheus.Desc
 }
 
@@ -112,10 +196,13 @@ func NewPartitionsCollector() *PartitionsCollector {
         labels := []string{"partition"}
         return &PartitionsCollector{
                 allocated: prometheus.NewDesc("slurm_partition_cpus_allocated", "Allocated CPUs for partition", labels,nil),
-		idle: prometheus.NewDesc("slurm_partition_cpus_idle", "Idle CPUs for partition", labels,nil),
-		other: prometheus.NewDesc("slurm_partition_cpus_other", "Other CPUs for partition", labels,nil),
-		pending: prometheus.NewDesc("slurm_partition_jobs_pending", "Pending jobs for partition", labels,nil),
-		total: prometheus.NewDesc("slurm_partition_cpus_total", "Total CPUs for partition", labels,nil),
+                idle: prometheus.NewDesc("slurm_partition_cpus_idle", "Idle CPUs for partition", labels,nil),
+                other: prometheus.NewDesc("slurm_partition_cpus_other", "Other CPUs for partition", labels,nil),
+                pending: prometheus.NewDesc("slurm_partition_jobs_pending", "Pending jobs for partition", labels,nil),
+                running: prometheus.NewDesc("slurm_partition_jobs_running", "Running jobs for partition", labels,nil),
+                suspended: prometheus.NewDesc("slurm_partition_jobs_suspended", "Suspended jobs for partition", labels,nil),
+                completing: prometheus.NewDesc("slurm_partition_jobs_completing", "Completing jobs for partition", labels,nil),
+                total: prometheus.NewDesc("slurm_partition_cpus_total", "Total CPUs for partition", labels,nil),
         }
 }
 
@@ -124,26 +211,38 @@ func (pc *PartitionsCollector) Describe(ch chan<- *prometheus.Desc) {
         ch <- pc.idle
         ch <- pc.other
         ch <- pc.pending
+        ch <- pc.running
+        ch <- pc.suspended
+        ch <- pc.completing
         ch <- pc.total
 }
 
 func (pc *PartitionsCollector) Collect(ch chan<- prometheus.Metric) {
         pm := ParsePartitionsMetrics()
         for p := range pm {
-                if pm[p].allocated > 0 {
+                if pm[p].allocated >= 0 {
                         ch <- prometheus.MustNewConstMetric(pc.allocated, prometheus.GaugeValue, pm[p].allocated, p)
                 }
-                if pm[p].idle > 0 {
+                if pm[p].idle >= 0 {
                         ch <- prometheus.MustNewConstMetric(pc.idle, prometheus.GaugeValue, pm[p].idle, p)
                 }
-                if pm[p].other > 0 {
+                if pm[p].other >= 0 {
                         ch <- prometheus.MustNewConstMetric(pc.other, prometheus.GaugeValue, pm[p].other, p)
                 }
-                if pm[p].pending > 0 {
+                if pm[p].pending >= 0 {
                         ch <- prometheus.MustNewConstMetric(pc.pending, prometheus.GaugeValue, pm[p].pending, p)
                 }
-                if pm[p].total > 0 {
+                if pm[p].running >= 0 {
+                        ch <- prometheus.MustNewConstMetric(pc.running, prometheus.GaugeValue, pm[p].running, p)
+                }
+                if pm[p].suspended >= 0 {
+                        ch <- prometheus.MustNewConstMetric(pc.suspended, prometheus.GaugeValue, pm[p].suspended, p)
+                }
+                if pm[p].completing >= 0 {
+                        ch <- prometheus.MustNewConstMetric(pc.completing, prometheus.GaugeValue, pm[p].completing, p)
+                }
+                if pm[p].total >= 0 {
                         ch <- prometheus.MustNewConstMetric(pc.total, prometheus.GaugeValue, pm[p].total, p)
                 }
         }
-}
+}			
